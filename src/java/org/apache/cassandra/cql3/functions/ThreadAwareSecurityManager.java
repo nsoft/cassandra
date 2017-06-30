@@ -49,6 +49,13 @@ import io.netty.util.concurrent.FastThreadLocal;
  */
 public final class ThreadAwareSecurityManager extends SecurityManager
 {
+
+    // this should remain private because any code attempting to use it to set the property would load the class
+    // before the property was set, which would then install the policy contrary to the user's intention.
+    // This would normally be set with -D property or in very front of static main method before any code
+    // involving an embedded cassandra is reached. See CASSANDRA-13396
+    private static final String CASSANDRA_INSECURE_UDF = "cassandra.insecure.udf";
+
     static final PermissionCollection noPermissions = new PermissionCollection()
     {
         public void add(Permission permission)
@@ -75,7 +82,7 @@ public final class ThreadAwareSecurityManager extends SecurityManager
 
     public static void install()
     {
-        if (installed)
+        if (installed || "true".equals(System.getProperty(CASSANDRA_INSECURE_UDF, "false")))
             return;
         System.setSecurityManager(new ThreadAwareSecurityManager());
 
@@ -135,62 +142,65 @@ public final class ThreadAwareSecurityManager extends SecurityManager
 
     static
     {
-        //
-        // Use own security policy to be easier (and faster) since the C* has no fine grained permissions.
-        // Either code has access to everything or code has access to nothing (UDFs).
-        // This also removes the burden to maintain and configure policy files for production, unit tests etc.
-        //
-        // Note: a permission is only granted, if there is no objector. This means that
-        // AccessController/AccessControlContext collect all applicable ProtectionDomains - only if none of these
-        // applicable ProtectionDomains denies access, the permission is granted.
-        // A ProtectionDomain can have its origin at an oridinary code-source or provided via a
-        // AccessController.doPrivileded() call.
-        //
-        Policy.setPolicy(new Policy()
+        if(!"true".equals(System.getProperty(CASSANDRA_INSECURE_UDF, "false")))
         {
-            public PermissionCollection getPermissions(CodeSource codesource)
+            //
+            // Use own security policy to be easier (and faster) since the C* has no fine grained permissions.
+            // Either code has access to everything or code has access to nothing (UDFs).
+            // This also removes the burden to maintain and configure policy files for production, unit tests etc.
+            //
+            // Note: a permission is only granted, if there is no objector. This means that
+            // AccessController/AccessControlContext collect all applicable ProtectionDomains - only if none of these
+            // applicable ProtectionDomains denies access, the permission is granted.
+            // A ProtectionDomain can have its origin at an oridinary code-source or provided via a
+            // AccessController.doPrivileded() call.
+            //
+            Policy.setPolicy(new Policy()
             {
-                // contract of getPermissions() methods is to return a _mutable_ PermissionCollection
-
-                Permissions perms = new Permissions();
-
-                if (codesource == null || codesource.getLocation() == null)
-                    return perms;
-
-                switch (codesource.getLocation().getProtocol())
+                public PermissionCollection getPermissions(CodeSource codesource)
                 {
-                    case "file":
-                        // All JARs and class files reside on the file system - we can safely
-                        // assume that these classes are "good".
-                        perms.add(new AllPermission());
+                    // contract of getPermissions() methods is to return a _mutable_ PermissionCollection
+
+                    Permissions perms = new Permissions();
+
+                    if (codesource == null || codesource.getLocation() == null)
                         return perms;
+
+                    switch (codesource.getLocation().getProtocol())
+                    {
+                        case "file":
+                            // All JARs and class files reside on the file system - we can safely
+                            // assume that these classes are "good".
+                            perms.add(new AllPermission());
+                            return perms;
+                    }
+
+                    return perms;
                 }
 
-                return perms;
-            }
-
-            public PermissionCollection getPermissions(ProtectionDomain domain)
-            {
-                return getPermissions(domain.getCodeSource());
-            }
-
-            public boolean implies(ProtectionDomain domain, Permission permission)
-            {
-                CodeSource codesource = domain.getCodeSource();
-                if (codesource == null || codesource.getLocation() == null)
-                    return false;
-
-                switch (codesource.getLocation().getProtocol())
+                public PermissionCollection getPermissions(ProtectionDomain domain)
                 {
-                    case "file":
-                        // All JARs and class files reside on the file system - we can safely
-                        // assume that these classes are "good".
-                        return true;
+                    return getPermissions(domain.getCodeSource());
                 }
 
-                return false;
-            }
-        });
+                public boolean implies(ProtectionDomain domain, Permission permission)
+                {
+                    CodeSource codesource = domain.getCodeSource();
+                    if (codesource == null || codesource.getLocation() == null)
+                        return false;
+
+                    switch (codesource.getLocation().getProtocol())
+                    {
+                        case "file":
+                            // All JARs and class files reside on the file system - we can safely
+                            // assume that these classes are "good".
+                            return true;
+                    }
+
+                    return false;
+                }
+            });
+        }
     }
 
     private static final FastThreadLocal<Boolean> initializedThread = new FastThreadLocal<>();
